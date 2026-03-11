@@ -13,7 +13,7 @@ from . import agents
 
 
 gym.register(
-    id="Template-Qmini-v0",
+    id="Qmini-Locomotion-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={

@@ -13,7 +13,7 @@ from . import agents
 
 
 gym.register(
-    id="Template-Qmini-Direct-v0",
+    id="Qmini-Locomotion-Direct-v0",
     entry_point=f"{__name__}.qmini_env:QminiEnv",
     disable_env_checker=True,
     kwargs={
