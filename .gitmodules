@@ -1,0 +1,3 @@
+[submodule "source/qmini/qmini/robots/assets/qmini"]
+	path = source/qmini/qmini/robots/assets/qmini
+	url = https://github.com/unitreerobotics/Qmini.git

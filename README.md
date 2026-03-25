@@ -60,6 +60,8 @@ It allows you to develop in an isolated environment, outside of the core Isaac L
             # use 'FULL_PATH_TO_isaaclab.sh|bat -p' instead of 'python' if Isaac Lab is not installed in Python venv or conda
             python scripts/random_agent.py --task=<TASK_NAME>
             ```
+### Task- Qmini
+Qmini-Velocity-Flat-v0
 
 ### Set up IDE (Optional)
 

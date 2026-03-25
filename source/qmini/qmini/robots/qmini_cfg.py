@@ -15,8 +15,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 
 QMINI_URDF_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..", "..", "..", "..", "..", "..",
-    "raise_gym", "assets", "robots", "qmini", "urdf", "Qmini.urdf",
+    "assets", "qmini", "urdf", "Qmini.urdf",
 )
 
 QMINI_CFG = ArticulationCfg(
