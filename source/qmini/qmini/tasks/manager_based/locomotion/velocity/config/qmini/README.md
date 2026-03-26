@@ -133,6 +133,10 @@ python scripts/rsl_rl/play.py --task Qmini-Velocity-Flat-Play-v0
 | Lambda (GAE) | 0.95 |
 | Max iterations | 1500 |
 
+## TODO
+
+- [ ] Ankle 링크에 고무 재질 physics material 적용 (static_friction 1.5~2.0, dynamic_friction 1.2~1.5, restitution 0.1~0.3)
+
 ## 파일 구조
 
 ```

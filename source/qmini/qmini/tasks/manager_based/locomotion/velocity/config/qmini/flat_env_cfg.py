@@ -197,6 +197,8 @@ class EventCfg:
 class RewardsCfg:
     """Reward terms for the MDP."""
 
+    # -- termination penalty
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
     # -- task: velocity tracking (yaw-frame for biped, like H1)
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_yaw_frame_exp,
@@ -244,16 +246,6 @@ class RewardsCfg:
         weight=-1.0,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=[".*_joint5"])},
     )
-    # -- penalize base_link and knee ground contact
-    base_contact_penalty = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-1.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", "LL_knee", "RL_knee", "LL_ankle", "RL_ankle"]),
-            "threshold": 1.0,
-        },
-    )
-    
 
 
 @configclass
@@ -261,6 +253,13 @@ class TerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    body_contact = DoneTerm(
+        func=mdp.illegal_contact,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["base_link", "LL_hip_pitch", "RL_hip_pitch"]),
+            "threshold": 1.0,
+        },
+    )
 
 
 ##

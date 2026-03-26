@@ -8,152 +8,84 @@ from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 
 
 class ContactVisRLEnv(ManagerBasedRLEnv):
-    """ManagerBasedRLEnv with visual contact feedback on all robot bodies.
+    """ManagerBasedRLEnv with visual contact feedback on robot bodies.
 
-    When any robot body contacts the ground (force > threshold), that body's mesh
-    turns red. When contact ends, it reverts to the default color.
+    When a monitored body contacts the ground (force > threshold), its visual mesh
+    turns red. When contact ends or the episode resets, the original color is restored
+    by removing the override material binding.
     """
 
     CONTACT_THRESHOLD = 1.0  # Newtons
+    # Only visualize unexpected contacts (exclude feet which always touch ground)
+    VIS_BODY_NAMES = {"base_link", "LL_hip_yaw", "LL_hip_roll", "LL_hip_pitch", "LL_knee",
+                      "RL_hip_yaw", "RL_hip_roll", "RL_hip_pitch", "RL_knee"}
 
     def __init__(self, cfg: ManagerBasedRLEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode=render_mode, **kwargs)
-
         self._contact_vis_initialized = False
         self._body_names: list[str] | None = None
 
-    def _create_omnipbr_material(self, stage, mat_path: str, color: tuple):
-        """Create an OmniPBR material compatible with Isaac Sim's RTX renderer."""
-        from pxr import Gf, Sdf, UsdShade
-
-        if stage.GetPrimAtPath(mat_path).IsValid():
-            return
-
-        UsdShade.Material.Define(stage, mat_path)
-        shader = UsdShade.Shader.Define(stage, mat_path + "/Shader")
-        shader.CreateIdAttr("OmniPBR")
-        shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(
-            Gf.Vec3f(*color)
-        )
-        shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(0.0)
-        shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(0.5)
-
-        mat = UsdShade.Material.Get(stage, mat_path)
-        mat.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
-
     def _init_contact_vis(self):
-        """Lazy initialization of contact visualization (called after first step)."""
+        """Lazy initialization of contact visualization."""
         if self._contact_vis_initialized:
             return
 
         try:
+            from pxr import Gf, Sdf, UsdShade
+
             import omni.usd
 
             stage = omni.usd.get_context().get_stage()
-
-            # Create OmniPBR materials (RTX renderer compatible)
-            red_mat_path = "/World/Looks/ContactRedMaterial"
-            default_mat_path = "/World/Looks/ContactDefaultMaterial"
-            self._create_omnipbr_material(stage, red_mat_path, (1.0, 0.0, 0.0))
-            self._create_omnipbr_material(stage, default_mat_path, (0.8, 0.8, 0.8))
-
             self._stage = stage
-            self._red_mat_path = red_mat_path
-            self._default_mat_path = default_mat_path
 
-            # Get all body names from the contact sensor
+            # Create a single red OmniPBR material
+            red_mat_path = "/World/Looks/ContactRedMaterial"
+            if not stage.GetPrimAtPath(red_mat_path).IsValid():
+                UsdShade.Material.Define(stage, red_mat_path)
+                shader = UsdShade.Shader.Define(stage, red_mat_path + "/Shader")
+                shader.CreateIdAttr("OmniPBR")
+                shader.CreateInput("diffuse_color_constant", Sdf.ValueTypeNames.Color3f).Set(
+                    Gf.Vec3f(1.0, 0.0, 0.0)
+                )
+                shader.CreateInput("metallic_constant", Sdf.ValueTypeNames.Float).Set(0.0)
+                shader.CreateInput("reflection_roughness_constant", Sdf.ValueTypeNames.Float).Set(0.5)
+                mat = UsdShade.Material.Get(stage, red_mat_path)
+                mat.CreateSurfaceOutput("mdl").ConnectToSource(shader.ConnectableAPI(), "out")
+
+            self._red_mat_path = red_mat_path
+
+            # Get body names from contact sensor
             contact_sensor = self.scene.sensors["contact_forces"]
             self._body_names = list(contact_sensor.body_names)
             self._num_bodies = len(self._body_names)
 
-            if not self._body_names:
-                print("[ContactVisRLEnv] WARNING: No bodies found in contact sensor. "
-                      "Contact visualization disabled.")
+            # Filter to only monitored bodies
+            self._vis_body_indices = [i for i, name in enumerate(self._body_names)
+                                      if name in self.VIS_BODY_NAMES]
 
-            # Build mapping: body_name -> list of visual prim paths (from env_0)
-            robot_prim_path = "/World/envs/env_0/Robot"
-            self._body_visual_paths: dict[str, list[str]] = {}
+            # Build visual prim path templates (from env_0)
+            self._body_visual_paths: dict[int, str] = {}  # body_idx -> visuals prim path
+            for body_idx in self._vis_body_indices:
+                body_name = self._body_names[body_idx]
+                vis_path = f"/World/envs/env_0/Robot/{body_name}/visuals"
+                if stage.GetPrimAtPath(vis_path).IsValid():
+                    self._body_visual_paths[body_idx] = vis_path
 
-            for body_name in self._body_names:
-                # Isaac Sim URDF import: visuals are under {body_name}/visuals
-                visuals_path = f"{robot_prim_path}/{body_name}/visuals"
-                prim = stage.GetPrimAtPath(visuals_path)
-                if prim.IsValid():
-                    self._body_visual_paths[body_name] = [visuals_path]
-                else:
-                    # Fallback: body prim itself
-                    body_path = f"{robot_prim_path}/{body_name}"
-                    prim = stage.GetPrimAtPath(body_path)
-                    if prim.IsValid():
-                        self._body_visual_paths[body_name] = [body_path]
-                    else:
-                        self._body_visual_paths[body_name] = []
-
-            # Store the original material binding for each body (to restore later)
-            self._body_original_mat: dict[str, str | None] = {}
-            for body_name, paths in self._body_visual_paths.items():
-                from pxr import UsdShade
-                if paths:
-                    prim = stage.GetPrimAtPath(paths[0])
-                    if prim.IsValid():
-                        binding_api = UsdShade.MaterialBindingAPI(prim)
-                        bound_mat, _ = binding_api.ComputeBoundMaterial()
-                        if bound_mat:
-                            self._body_original_mat[body_name] = bound_mat.GetPath().pathString
-                        else:
-                            self._body_original_mat[body_name] = default_mat_path
-                    else:
-                        self._body_original_mat[body_name] = default_mat_path
-                else:
-                    self._body_original_mat[body_name] = default_mat_path
-
-            # Track previous contact state per body
-            # Shape: (num_envs, num_bodies)
+            # Track contact state
             self._prev_contact_state = torch.zeros(
                 self.num_envs, self._num_bodies, dtype=torch.bool, device=self.device
             )
 
             self._contact_vis_initialized = True
-
-            mapped = [n for n, p in self._body_visual_paths.items() if p]
-            print(f"[ContactVisRLEnv] Contact visualization initialized: "
-                  f"{len(mapped)}/{self._num_bodies} bodies mapped")
+            vis_names = [self._body_names[i] for i in self._body_visual_paths]
+            print(f"[ContactVisRLEnv] Initialized: monitoring {vis_names}")
 
         except Exception as e:
             import traceback
-            print(f"[ContactVisRLEnv] Failed to initialize contact visualization: {e}")
+            print(f"[ContactVisRLEnv] Failed to initialize: {e}")
             traceback.print_exc()
             self._contact_vis_initialized = True
             self._body_names = None
-
-    def _reset_contact_colors(self, env_ids: list[int]):
-        """Restore original material colors for reset environments."""
-        if not self._contact_vis_initialized or not self._body_names:
-            return
-
-        try:
-            from pxr import UsdShade
-
-            for env_id in env_ids:
-                for body_idx, body_name in enumerate(self._body_names):
-                    if not self._prev_contact_state[env_id, body_idx]:
-                        continue
-
-                    template_paths = self._body_visual_paths.get(body_name, [])
-                    orig_path = self._body_original_mat.get(body_name, self._default_mat_path)
-                    mat = UsdShade.Material.Get(self._stage, orig_path)
-
-                    for tmpl_path in template_paths:
-                        prim_path = tmpl_path.replace("/env_0/", f"/env_{env_id}/")
-                        prim = self._stage.GetPrimAtPath(prim_path)
-                        if prim.IsValid():
-                            binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
-                            binding_api.Bind(mat, UsdShade.Tokens.strongerThanDescendants)
-
-                    self._prev_contact_state[env_id, body_idx] = False
-
-        except Exception as e:
-            print(f"[ContactVisRLEnv] Error resetting contact colors: {e}")
 
     def step(self, action: torch.Tensor):
         """Override step to add contact color visualization."""
@@ -171,65 +103,73 @@ class ContactVisRLEnv(ManagerBasedRLEnv):
 
         return result
 
+    def _bind_red(self, env_id: int, body_idx: int):
+        """Bind red material to a body's visuals."""
+        from pxr import UsdShade
+
+        tmpl_path = self._body_visual_paths.get(body_idx)
+        if not tmpl_path:
+            return
+        prim_path = tmpl_path.replace("/env_0/", f"/env_{env_id}/")
+        prim = self._stage.GetPrimAtPath(prim_path)
+        if prim.IsValid():
+            red_mat = UsdShade.Material.Get(self._stage, self._red_mat_path)
+            binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+            binding_api.Bind(red_mat, UsdShade.Tokens.strongerThanDescendants)
+
+    def _unbind(self, env_id: int, body_idx: int):
+        """Remove material override to restore original appearance."""
+        from pxr import UsdShade
+
+        tmpl_path = self._body_visual_paths.get(body_idx)
+        if not tmpl_path:
+            return
+        prim_path = tmpl_path.replace("/env_0/", f"/env_{env_id}/")
+        prim = self._stage.GetPrimAtPath(prim_path)
+        if prim.IsValid():
+            binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
+            binding_api.UnbindDirectBinding()
+
+    def _reset_contact_colors(self, env_ids: list[int]):
+        """Restore original colors for reset environments."""
+        if not self._body_names:
+            return
+        for env_id in env_ids:
+            for body_idx in self._vis_body_indices:
+                if self._prev_contact_state[env_id, body_idx]:
+                    self._unbind(env_id, body_idx)
+                    self._prev_contact_state[env_id, body_idx] = False
+
     def _update_contact_colors(self):
-        """Check all body contacts and update mesh colors."""
+        """Check body contacts and update colors."""
         if not self._body_names:
             return
 
         try:
-            from pxr import UsdShade
-
             contact_sensor = self.scene.sensors["contact_forces"]
             net_forces = contact_sensor.data.net_forces_w
-
             force_magnitudes = torch.norm(net_forces, dim=-1)
             contact_mask = force_magnitudes > self.CONTACT_THRESHOLD
-
-            # Log newly contacted bodies
-            new_contacts = contact_mask & ~self._prev_contact_state
-            if new_contacts.any():
-                for env_id in range(self.num_envs):
-                    body_ids = new_contacts[env_id].nonzero(as_tuple=False).squeeze(-1).tolist()
-                    if body_ids:
-                        names = [self._body_names[i] for i in body_ids]
-                        forces = [f"{force_magnitudes[env_id, i].item():.1f}N" for i in body_ids]
-                        contact_info = ", ".join(f"{n}({f})" for n, f in zip(names, forces))
-                        print(f"[Contact] env_{env_id}: {contact_info}")
 
             changed = contact_mask != self._prev_contact_state
             if not changed.any():
                 return
 
-            red_mat = UsdShade.Material.Get(self._stage, self._red_mat_path)
-
             env_ids, body_ids = changed.nonzero(as_tuple=True)
 
             for env_id, body_id in zip(env_ids.tolist(), body_ids.tolist()):
-                body_name = self._body_names[body_id]
-                template_paths = self._body_visual_paths.get(body_name, [])
-                if not template_paths:
+                if body_id not in self._body_visual_paths:
                     continue
 
-                is_contact = contact_mask[env_id, body_id].item()
-
-                if is_contact:
-                    mat = red_mat
+                if contact_mask[env_id, body_id]:
+                    self._bind_red(env_id, body_id)
                 else:
-                    # Restore original material
-                    orig_path = self._body_original_mat.get(body_name, self._default_mat_path)
-                    mat = UsdShade.Material.Get(self._stage, orig_path)
-
-                for tmpl_path in template_paths:
-                    prim_path = tmpl_path.replace("/env_0/", f"/env_{env_id}/")
-                    prim = self._stage.GetPrimAtPath(prim_path)
-                    if prim.IsValid():
-                        binding_api = UsdShade.MaterialBindingAPI.Apply(prim)
-                        binding_api.Bind(mat, UsdShade.Tokens.strongerThanDescendants)
+                    self._unbind(env_id, body_id)
 
             self._prev_contact_state = contact_mask.clone()
 
         except Exception as e:
             import traceback
-            print(f"[ContactVisRLEnv] Error updating contact colors: {e}")
+            print(f"[ContactVisRLEnv] Error: {e}")
             traceback.print_exc()
             self._body_names = None
